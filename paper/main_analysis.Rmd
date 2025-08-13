@@ -1,0 +1,605 @@
+---
+title: "The Breakdown of the Classic Portfolio Hedge: A Comprehensive Markov-Switching Analysis"
+author: "Financial Risk Analyst"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    theme: journal
+    highlight: tango
+    df_print: paged
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+# This chunk sets up the global options for the document.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE, fig.align = "center")
+
+# Set FRED API key (reads from .Renviron automatically)
+# Ensure you have a .Renviron file in your project directory with:
+# FRED_API_KEY="YOUR_API_KEY_HERE"
+library(fredr)
+fredr_set_key(Sys.getenv("FRED_API_KEY"))
+
+# Verify API key is available
+if (Sys.getenv("FRED_API_KEY") == "") {
+  stop("FRED API key not found. Please add FRED_API_KEY to your .Renviron file.")
+}
+
+# Load required libraries
+suppressPackageStartupMessages({
+  library(quantmod)
+  library(tidyverse)
+  library(PerformanceAnalytics)
+  library(MSwM)
+  library(knitr)
+  library(kableExtra)
+  library(plotly)
+  library(corrplot)
+  library(gridExtra)
+  library(viridis)
+  library(lubridate)
+  library(FinTS)     # For ArchTest
+  library(tseries)   # For jarque.bera.test
+  library(patchwork) # For combining plots
+  library(TTR)       # For runCor function
+})
+
+# Set reproducible seed
+set.seed(42)
+
+# Set theme for ggplot
+theme_set(theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5, size = 12)))
+
+# Print session info for reproducibility
+cat("R Version:", R.version.string, "\n")
+cat("Analysis run on:", Sys.Date(), "\n")
+```
+
+# 1. Executive Summary
+
+This analysis investigates the breakdown of the traditional stock-bond hedge during the high-inflation period of 2022-2023. Using advanced econometric techniques, we provide quantitative evidence that the fundamental relationship between stocks and Treasury bonds underwent a structural regime change during this period.
+
+**Key Findings:**
+
+- The stock-bond correlation switched from a historical negative value to a strongly positive one during 2022-2023.
+- A Markov-Switching model formally identifies two distinct market regimes: a low-volatility, negative-correlation "Normal" regime and a high-volatility, positive-correlation "Crisis" regime.
+- The 2022-2023 period was dominated by this "Crisis" regime, fundamentally differing from prior crises (GFC, COVID-19) where the stock-bond hedge held or strengthened.
+- Traditional 60/40 portfolios experienced significant simultaneous losses in both asset classes, highlighting the failure of the diversification strategy.
+
+# 2. Introduction and Research Question
+
+Modern portfolio theory relies heavily on the negative correlation between stocks (risk assets) and Treasury bonds (safe-haven assets). This relationship has been the cornerstone of diversified portfolio construction for decades. However, recent market events suggest this relationship may not be stable across all macroeconomic environments.
+
+**Research Question:** Did the U.S. stock-bond relationship switch to a distinct positive-correlation regime during 2022-2023, and can this be formally identified using a regime-switching model?
+
+**Hypothesis:** We hypothesize that inflation-driven market stress creates a fundamentally different regime compared to deflationary or liquidity crises, where both stocks and bonds decline simultaneously due to rising real interest rates.
+
+# 3. Methodology and Data
+
+## 3.1. Data Acquisition and Preparation
+
+We source daily data from January 1, 2007, to December 29, 2023, providing over 16 years of observations across multiple market cycles.
+
+**Asset Selection:**
+- **Stock Proxy:** SPDR S&P 500 ETF (SPY)
+- **Bond Proxy:** iShares 20+ Year Treasury Bond ETF (TLT)
+- **Macro Context:** CPI, Federal Funds Rate, and Unemployment Rate from FRED.
+
+```{r data_acquisition}
+# Define symbols and date range
+symbols <- c("SPY", "TLT")
+fred_symbols <- c("CPIAUCSL", "DFF", "UNRATE")
+start_date <- "2007-01-01"
+end_date <- "2023-12-31"
+
+# Get stock/bond data from Yahoo Finance
+cat("Downloading market data from Yahoo Finance...\n")
+getSymbols(symbols, src = "yahoo", from = start_date, to = end_date, auto.assign = TRUE)
+
+# Get macroeconomic data from FRED
+cat("Downloading macroeconomic data from FRED...\n")
+macro_list <- map(fred_symbols, ~fredr(series_id = .x, observation_start = as.Date(start_date), observation_end = as.Date(end_date)))
+names(macro_list) <- fred_symbols
+
+# Convert macro data to a single xts object
+macro_xts_list <- map(macro_list, ~xts(.x$value, order.by = .x$date))
+macro_xts <- do.call(merge.xts, macro_xts_list)
+colnames(macro_xts) <- fred_symbols
+
+# Calculate returns and create portfolio
+prices <- merge.xts(Ad(SPY), Ad(TLT))
+returns <- na.omit(Return.calculate(prices, method = "log"))
+colnames(returns) <- c("SPY_Return", "TLT_Return")
+returns$Portfolio_60_40 <- 0.6 * returns$SPY_Return + 0.4 * returns$TLT_Return
+
+# Merge all data and carry forward monthly macro data
+full_xts <- merge.xts(returns, macro_xts)
+full_xts <- na.locf(full_xts)
+
+# Convert to a data.frame for analysis
+full_data <- full_xts %>%
+  as.data.frame() %>%
+  rownames_to_column("Date") %>%
+  mutate(Date = as.Date(Date)) %>%
+  filter(complete.cases(SPY_Return, TLT_Return)) # Ensure no NA returns
+
+# Calculate YoY CPI inflation (using a 252-day trading year approximation)
+full_data <- full_data %>%
+  arrange(Date) %>%
+  mutate(CPI_YoY = (CPIAUCSL / lag(CPIAUCSL, 252) - 1) * 100)
+
+# Display summary statistics
+summary_stats_data <- full_data %>%
+  select(SPY_Return, TLT_Return, Portfolio_60_40, CPI_YoY, DFF, UNRATE)
+
+summary_stats <- data.frame(
+  Mean = colMeans(summary_stats_data, na.rm = TRUE),
+  Std_Dev = apply(summary_stats_data, 2, sd, na.rm = TRUE),
+  Min = apply(summary_stats_data, 2, min, na.rm = TRUE),
+  Max = apply(summary_stats_data, 2, max, na.rm = TRUE)
+)
+
+kable(summary_stats,
+      digits = 4,
+      caption = "Summary Statistics of Key Variables") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+cat("Data successfully loaded:", nrow(full_data), "observations from", 
+    format(min(full_data$Date), "%Y-%m-%d"), "to", format(max(full_data$Date), "%Y-%m-%d"), "\n")
+```
+
+```{r prespecification_tests, echo=TRUE}
+# Prepare clean data for testing
+test_data <- na.omit(full_data[, c("SPY_Return", "TLT_Return")])
+
+cat("Running prespecification tests to justify regime-switching approach...\n")
+
+# Test 1: ARCH-LM Test for Volatility Clustering
+spy_ar_model <- ar(test_data$SPY_Return, order.max = 1, aic = FALSE, method = "mle")
+spy_arch_test <- ArchTest(spy_ar_model$resid, lags = 12)
+
+tlt_ar_model <- ar(test_data$TLT_Return, order.max = 1, aic = FALSE, method = "mle")
+tlt_arch_test <- ArchTest(tlt_ar_model$resid, lags = 12)
+
+# Test 2: Jarque-Bera Test for Non-Normality
+spy_jb_test <- jarque.bera.test(test_data$SPY_Return)
+tlt_jb_test <- jarque.bera.test(test_data$TLT_Return)
+
+# Create a clean summary table
+prespec_results <- data.frame(
+  Test = c("ARCH-LM Test (p-value)", "Jarque-Bera Test (p-value)"),
+  `S&P 500 (SPY)` = c(spy_arch_test$p.value, spy_jb_test$p.value),
+  `20Y+ Treasury (TLT)` = c(tlt_arch_test$p.value, tlt_jb_test$p.value)
+)
+
+kable(prespec_results, 
+      digits = 4,
+      caption = "Results of Prespecification Tests for Model Justification") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE) %>%
+  add_footnote("P-values below 0.05 indicate rejection of the null hypothesis (i.e., presence of ARCH effects and non-normality).")
+```
+
+## 3.2. Crisis Period Definitions
+
+We define these periods for contextual analysis. The model itself discovers regimes without this prior information.
+
+```{r define_periods}
+crisis_periods <- data.frame(
+  Period = c("Global Financial Crisis", "COVID-19 Crash", "2022-23 Inflation Crisis"),
+  Start = as.Date(c("2008-09-15", "2020-02-19", "2022-01-01")),
+  End = as.Date(c("2009-03-09", "2020-04-30", "2023-12-31")),
+  Type = c("Credit/Liquidity", "Pandemic/Liquidity", "Inflation/Monetary")
+)
+
+kable(crisis_periods, caption = "Crisis Periods for Reference") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+# 4. Exploratory Data Analysis
+
+## 4.1. Price Performance Visualization
+
+```{r price_performance, dpi=300, fig.width=10, fig.height=6}
+# Create performance data for plotting
+performance_data <- full_data %>%
+  select(Date, SPY_Return, TLT_Return, Portfolio_60_40) %>%
+  arrange(Date) %>%
+  mutate(
+    `S&P 500` = cumprod(1 + SPY_Return),
+    `20Y+ Treasury` = cumprod(1 + TLT_Return),
+    `60/40 Portfolio` = cumprod(1 + Portfolio_60_40)
+  ) %>%
+  select(Date, `S&P 500`, `20Y+ Treasury`, `60/40 Portfolio`) %>%
+  pivot_longer(-Date, names_to = "Asset", values_to = "Cumulative_Return")
+
+p1 <- ggplot(performance_data, aes(x = Date, y = Cumulative_Return, color = Asset)) +
+  geom_line(linewidth = 1) +
+  scale_y_log10() +
+  labs(
+    title = "Cumulative Performance: Stock, Bonds, and 60/40 Portfolio",
+    subtitle = "Log scale, normalized to $1 starting value",
+    x = "Date", y = "Cumulative Return (Log Scale)", color = "Asset Class"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Add crisis period shading
+for(i in 1:nrow(crisis_periods)) {
+  p1 <- p1 + annotate("rect", 
+                      xmin = crisis_periods$Start[i], xmax = crisis_periods$End[i],
+                      ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray70")
+}
+
+print(p1)
+```
+
+## 4.2. Dynamic Correlation Analysis
+
+```{r rolling_correlation, dpi=300, fig.width=12, fig.height=10}
+# Calculate multiple rolling correlation windows
+windows <- c(30, 60, 90)
+correlation_data <- map_dfr(windows, function(w) {
+  roll_corr <- runCor(
+    x = returns$SPY_Return, y = returns$TLT_Return, n = w,
+    use = "pairwise.complete.obs", sample = FALSE
+  )
+  data.frame(
+    Date = index(roll_corr),
+    Correlation = as.numeric(roll_corr),
+    Window = paste0(w, "-day")
+  )
+}) %>% na.omit()
+
+p2 <- ggplot(correlation_data, aes(x = Date, y = Correlation, color = Window)) +
+  geom_line(linewidth = 0.8, alpha = 0.8) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  labs(
+    title = "Rolling Stock-Bond Correlations",
+    subtitle = "Multiple time windows show consistent regime breakdown in 2022-2023",
+    x = "Date", y = "Pearson Correlation"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+# Add crisis period annotations
+for(i in 1:nrow(crisis_periods)) {
+  p2 <- p2 + annotate("rect", 
+                      xmin = crisis_periods$Start[i], xmax = crisis_periods$End[i],
+                      ymin = -Inf, ymax = Inf, alpha = 0.2, fill = "gray70")
+}
+
+# Create annual correlation heatmap
+yearly_corr <- full_data %>%
+  mutate(Year = year(Date)) %>%
+  group_by(Year) %>%
+  summarise(Correlation = cor(SPY_Return, TLT_Return), .groups = 'drop')
+
+p3 <- ggplot(yearly_corr, aes(x = Year, y = 1, fill = Correlation)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = round(Correlation, 2)), color = "white", size = 3) +
+  scale_fill_viridis_c(name = "Correlation", option = "C") +
+  labs(title = "Annual Stock-Bond Correlation Heatmap", x = "Year", y = "") +
+  theme_minimal() +
+  theme(axis.text.y = element_blank(), panel.grid = element_blank())
+
+# Combine plots using patchwork
+p2 / p3
+```
+
+**Key Observations:**
+
+1. The 2022-2023 period shows the most sustained and strongly positive correlation in the entire sample.
+2. Previous crises (GFC, COVID) actually strengthened the negative correlation temporarily, highlighting their different nature.
+3. The regime change appears to have started in late 2021 and persisted through 2023.
+
+# 5. Markov-Switching Model Analysis
+
+## 5.1. Model Specification and Fitting
+
+We implement univariate two-state Markov-Switching models for each asset. This allows us to identify regimes based on each asset's own behavior (mean and volatility). We will then analyze the cross-asset correlation within these identified regimes. We use the SPY model's regimes as the primary indicator for the market state.
+
+```{r markov_model, cache=TRUE}
+cat("Fitting Markov-Switching models...\n")
+
+# Prepare data (use the returns xts object for simplicity with msmFit)
+ms_data <- returns[, c("SPY_Return", "TLT_Return")]
+ms_data <- ms_data[complete.cases(ms_data), ]
+
+# Fit SPY model (this will be our primary regime indicator)
+cat("Fitting S&P 500 regime-switching model...\n")
+mod_spy <- lm(SPY_Return ~ 1, data = as.data.frame(ms_data))
+msm_spy <- msmFit(mod_spy, k = 2, sw = rep(TRUE, 2))
+
+# Fit TLT model for comparison
+cat("Fitting Treasury bond regime-switching model...\n")
+mod_tlt <- lm(TLT_Return ~ 1, data = as.data.frame(ms_data))
+msm_tlt <- msmFit(mod_tlt, k = 2, sw = rep(TRUE, 2))
+
+cat("Markov-switching models successfully fitted!\n")
+```
+
+## 5.2. Regime Characterization
+
+We analyze the characteristics of the two regimes identified by the models. We will label the regime with higher volatility as the "Crisis" regime and the lower volatility one as the "Normal" regime.
+
+```{r regime_analysis}
+# Function to display and label regime characteristics
+display_regime_comparison <- function(msm_obj, asset_name) {
+  cat(sprintf("\n=== REGIME COMPARISON: %s ===\n", asset_name))
+  
+  # Extract components
+  coefs <- msm_obj@Coef
+  stdevs <- msm_obj@std
+  trans_mat <- msm_obj@transMat
+  
+  # Identify crisis regime based on higher volatility
+  crisis_regime_idx <- which.max(stdevs)
+  normal_regime_idx <- which.min(stdevs)
+  
+  # Build comparison table with clear labels
+  regime_df <- data.frame(
+    Regime = c("Normal", "Crisis"),
+    `Mean (% daily)` = c(coefs[normal_regime_idx, 1], coefs[crisis_regime_idx, 1]) * 100,
+    `Volatility (% daily)` = c(stdevs[normal_regime_idx], stdevs[crisis_regime_idx]) * 100,
+    `Persistence` = c(trans_mat[normal_regime_idx, normal_regime_idx], trans_mat[crisis_regime_idx, crisis_regime_idx]),
+    `Expected Duration (Days)` = c(1 / (1 - trans_mat[normal_regime_idx, normal_regime_idx]), 1 / (1 - trans_mat[crisis_regime_idx, crisis_regime_idx]))
+  )
+  
+  print(
+    kable(regime_df, digits = 3, row.names = FALSE,
+          caption = sprintf("Regime Characteristics for %s", asset_name)) %>%
+      kable_styling(bootstrap_options = "striped", full_width = FALSE)
+  )
+  cat("\n")
+}
+
+# Display results for both models
+display_regime_comparison(msm_spy, "S&P 500 (SPY)")
+display_regime_comparison(msm_tlt, "20Y+ Treasury (TLT)")
+```
+
+## 5.3. Regime Probability Analysis
+
+We plot the smoothed probability of being in the "Crisis" regime over time, using the SPY model as our market indicator.
+
+```{r regime_probabilities, fig.width=12, fig.height=6}
+# Robustly identify crisis regime based on higher volatility in the SPY model
+crisis_regime_idx <- which.max(msm_spy@std)
+cat("Identifying Crisis Regime as Regime", crisis_regime_idx, "(higher volatility).\n")
+
+# Extract smoothed probabilities
+probs_matrix <- msm_spy@Fit@smoProb
+valid_dates <- index(ms_data)
+
+# Ensure lengths match properly
+n_probs <- nrow(probs_matrix)
+n_dates <- length(valid_dates)
+
+if (n_dates >= n_probs) {
+  dates_to_use <- tail(valid_dates, n_probs)
+} else {
+  probs_matrix <- tail(probs_matrix, n_dates)
+  dates_to_use <- valid_dates
+}
+
+# Create probabilities data frame
+probs_df <- data.frame(
+  Date = as.Date(dates_to_use),
+  Crisis_Prob = probs_matrix[, crisis_regime_idx],
+  Normal_Prob = probs_matrix[, -crisis_regime_idx]
+)
+
+# Plot regime probabilities
+p4 <- ggplot(probs_df, aes(x = Date)) +
+  geom_area(aes(y = Crisis_Prob, fill = "Crisis"), alpha = 0.7) +
+  scale_fill_manual(values = c("Crisis" = "darkred"), name = "Regime") +
+  labs(
+    title = "Probability of Crisis Regime (Based on SPY Volatility)",
+    subtitle = "Model identifies a sustained crisis period in 2022-2023",
+    x = "Date", y = "Smoothed Probability"
+  ) +
+  scale_y_continuous(labels = scales::percent) +
+  theme_bw()
+
+# Shade known crisis windows for comparison
+for (i in seq_len(nrow(crisis_periods))) {
+  p4 <- p4 + annotate("rect", xmin = crisis_periods$Start[i], xmax = crisis_periods$End[i],
+                      ymin = -Inf, ymax = Inf, alpha = 0.15, fill = "black")
+}
+print(p4)
+
+# Compute annual crisis regime statistics
+regime_stats <- probs_df %>%
+  mutate(Year = year(Date), In_Crisis = Crisis_Prob > 0.5) %>%
+  group_by(Year) %>%
+  summarise(
+    Avg_Crisis_Prob = mean(Crisis_Prob),
+    Pct_Days_in_Crisis = mean(In_Crisis) * 100,
+    .groups = "drop"
+  )
+
+kable(regime_stats,
+      digits = 1,
+      col.names = c("Year", "Avg. Crisis Probability (%)", "% of Days in Crisis"),
+      caption = "Annual Crisis Regime Statistics") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE) %>%
+  row_spec(which(regime_stats$Year %in% c(2022, 2023)),
+           bold = TRUE, background = "#F7DC6F")
+```
+
+# 6. Economic Interpretation and Implications
+
+## 6.1. Macroeconomic Context
+
+The crisis regime identified by the model strongly correlates with periods of high inflation and aggressive monetary tightening by the Federal Reserve.
+
+```{r macro_context, fig.width=12, fig.height=6}
+# Merge probabilities with macro data
+analysis_data <- full_data %>%
+  left_join(probs_df, by = "Date") %>%
+  filter(!is.na(Crisis_Prob))
+
+# Plot macro indicators against crisis probability
+p5 <- ggplot(analysis_data, aes(x = Date)) +
+  geom_area(aes(y = Crisis_Prob), fill = "darkred", alpha = 0.5) +
+  geom_line(aes(y = CPI_YoY / max(CPI_YoY, na.rm=TRUE), color = "CPI YoY %"), linewidth = 1) +
+  geom_line(aes(y = DFF / max(DFF, na.rm=TRUE), color = "Fed Funds Rate %"), linewidth = 1) +
+  scale_y_continuous(
+    name = "Crisis Probability",
+    labels = scales::percent,
+    sec.axis = sec_axis(~ . * max(analysis_data$CPI_YoY, na.rm=TRUE), name = "Scaled Macro Variable (%)")
+  ) +
+  scale_color_manual(name = "Indicator", values = c("CPI YoY %" = "black", "Fed Funds Rate %" = "blue")) +
+  labs(
+    title = "Macroeconomic Context and Crisis Regime Probability",
+    subtitle = "Crisis regime probability (red area) rises with inflation and Fed rate hikes"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+print(p5)
+```
+
+## 6.2. Portfolio Performance Impact
+
+Most critically, the stock-bond correlation flips from negative to positive in the crisis regime, destroying the diversification benefit of the 60/40 portfolio when it is needed most.
+
+```{r portfolio_impact, fig.width=12, fig.height=8}
+# Calculate regime-specific performance
+analysis_data <- analysis_data %>%
+  mutate(Regime = ifelse(Crisis_Prob > 0.5, "Crisis", "Normal"))
+
+regime_performance <- analysis_data %>%
+  group_by(Regime) %>%
+  summarise(
+    `Annualized Return (SPY)` = mean(SPY_Return) * 252 * 100,
+    `Annualized Return (TLT)` = mean(TLT_Return) * 252 * 100,
+    `Annualized Return (60/40)` = mean(Portfolio_60_40) * 252 * 100,
+    `Annualized Volatility (60/40)` = sd(Portfolio_60_40) * sqrt(252) * 100,
+    `Stock-Bond Correlation` = cor(SPY_Return, TLT_Return),
+    `Share of Period (%)` = n() / nrow(analysis_data) * 100,
+    .groups = 'drop'
+  )
+
+kable(regime_performance, digits = 2,
+      caption = "Performance Statistics by Market Regime") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+
+# Drawdown analysis
+drawdown_data <- analysis_data %>%
+  arrange(Date) %>%
+  mutate(
+    Portfolio_Cumulative = cumprod(1 + Portfolio_60_40),
+    Portfolio_Peak = cummax(Portfolio_Cumulative),
+    Portfolio_Drawdown = (Portfolio_Cumulative / Portfolio_Peak - 1) * 100
+  )
+
+p6 <- ggplot(drawdown_data, aes(x = Date, y = Portfolio_Drawdown)) +
+  geom_area(aes(fill = Regime), alpha = 0.7) +
+  geom_line() +
+  scale_fill_manual(values = c("Crisis" = "darkred", "Normal" = "steelblue")) +
+  labs(
+    title = "60/40 Portfolio Drawdowns by Market Regime",
+    subtitle = "Largest drawdowns occur during the 'Crisis' regime",
+    x = "Date", y = "Drawdown (%)"
+  ) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  theme_bw()
+
+print(p6)
+```
+
+# 7. Robustness Tests
+
+To ensure our findings are robust, we test alternative correlation measures for the 2022-2023 crisis period. All measures confirm a strong positive correlation, validating our primary conclusion.
+
+```{r robustness_tests}
+# Test different correlation measures for the 2022-2023 period
+crisis_period_2022_2023 <- full_data %>%
+  filter(year(Date) %in% c(2022, 2023))
+
+correlation_measures <- data.frame(
+  Measure = c("Pearson (linear)", "Spearman (rank)", "Kendall (rank)"),
+  Correlation_2022_2023 = c(
+    cor(crisis_period_2022_2023$SPY_Return, crisis_period_2022_2023$TLT_Return, method = "pearson"),
+    cor(crisis_period_2022_2023$SPY_Return, crisis_period_2022_2023$TLT_Return, method = "spearman"),
+    cor(crisis_period_2022_2023$SPY_Return, crisis_period_2022_2023$TLT_Return, method = "kendall")
+  )
+)
+
+kable(correlation_measures, digits = 3,
+      caption = "Alternative Correlation Measures for the 2022-2023 Period") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+# 8. Conclusions and Investment Implications
+
+## 8.1. Key Findings
+
+Our analysis provides compelling evidence for a fundamental, inflation-driven regime change in the stock-bond relationship.
+
+```{r key_findings_summary}
+# Extract key metrics for the summary table from the regime_performance data frame
+crisis_row <- filter(regime_performance, Regime == "Crisis")
+normal_row <- filter(regime_performance, Regime == "Normal")
+
+period_2022_2023 <- regime_stats %>% filter(Year %in% c(2022, 2023))
+avg_crisis_prob_2022_2023 <- mean(period_2022_2023$Avg_Crisis_Prob) * 100
+
+key_findings <- data.frame(
+  Metric = c(
+    "Normal Regime Stock-Bond Correlation",
+    "Crisis Regime Stock-Bond Correlation",
+    "Normal Regime 60/40 Volatility (%)",
+    "Crisis Regime 60/40 Volatility (%)",
+    "Avg. Crisis Probability in 2022-2023 (%)"
+  ),
+  Value = c(
+    normal_row$`Stock-Bond Correlation`,
+    crisis_row$`Stock-Bond Correlation`,
+    normal_row$`Annualized Volatility (60/40)`,
+    crisis_row$`Annualized Volatility (60/40)`,
+    avg_crisis_prob_2022_2023
+  )
+)
+
+kable(key_findings, digits = 2,
+      caption = "Summary of Key Empirical Findings") %>%
+  kable_styling(bootstrap_options = "striped", full_width = FALSE)
+```
+
+**Summary of Evidence:**
+
+1. **Regime Identification:** The Markov-Switching model successfully identified two distinct regimes driven by volatility.
+2. **Correlation Flip:** The analysis shows a dramatic flip in correlation from negative in the "Normal" regime to strongly positive in the "Crisis" regime.
+3. **Timing and Persistence:** The "Crisis" regime dominated the 2022-2023 period with high persistence, indicating a structural shift rather than a temporary dislocation.
+4. **Economic Drivers:** The regime change is clearly linked to the macroeconomic environment of high inflation and rising interest rates.
+
+## 8.2. Investment Implications
+
+**For Portfolio Construction:**
+- The traditional 60/40 portfolio is an unreliable diversifier during inflationary regimes.
+- There is a critical need to include alternative diversifiers (e.g., commodities, real assets, inflation-linked securities) that may perform better in this new regime.
+
+**For Risk Management:**
+- Static correlation assumptions in risk models are dangerous and must be updated to account for regime-dependent behavior.
+- Stress tests must include scenarios of sustained, high inflation and positive stock-bond correlation.
+
+**For Asset Allocation:**
+- The breakdown of the stock-bond hedge challenges foundational principles of modern portfolio theory in the current macroeconomic environment.
+- Asset allocation frameworks should be dynamic and regime-aware.
+
+```{r session_info}
+cat("Analysis completed successfully!\n")
+cat("Session Information:\n")
+sessionInfo()
+```
+
+---
+
+**Disclaimer:** This analysis is for research and educational purposes only and should not be considered investment advice. Past performance does not guarantee future results.
