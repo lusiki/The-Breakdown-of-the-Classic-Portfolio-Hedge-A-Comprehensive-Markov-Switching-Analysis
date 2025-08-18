@@ -1,4 +1,12 @@
-# The Breakdown of the Classic Portfolio Hedge: A Comprehensive Markov-Switching Analysis()
+
+
+
+![](data/goodinvestment.jpg)
+
+
+# The Breakdown of the Classic Portfolio Hedge: A Comprehensive Markov-Switching Analysis
+
+
 
 This repository contains the complete code and analysis for investigating the breakdown of the traditional stock-bond hedge during the high-inflation period of 2022-2023.
 The executive analysis is avaliable on the [link](https://raw.githack.com/lusiki/The-Breakdown-of-the-Classic-Portfolio-Hedge-A-Comprehensive-Markov-Switching-Analysis/main/paper/main_analysis.html).

@@ -1,6 +1,6 @@
 ---
 title: "The Breakdown of the Classic Portfolio Hedge: A Comprehensive Markov-Switching Analysis"
-author: "Financial Risk Analyst"
+author: "Lux"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -327,41 +327,53 @@ cat("Markov-switching models successfully fitted!\n")
 
 We analyze the characteristics of the two regimes identified by the models. We will label the regime with higher volatility as the "Crisis" regime and the lower volatility one as the "Normal" regime.
 
-```{r regime_analysis}
-# Function to display and label regime characteristics
+
+
+```{r regime_analysis, echo=FALSE, message=FALSE, warning=FALSE}
+# Make sure these libraries are loaded
+# library(knitr)
+# library(kableExtra)
+
 display_regime_comparison <- function(msm_obj, asset_name) {
-  cat(sprintf("\n=== REGIME COMPARISON: %s ===\n", asset_name))
-  
   # Extract components
-  coefs <- msm_obj@Coef
-  stdevs <- msm_obj@std
-  trans_mat <- msm_obj@transMat
-  
-  # Identify crisis regime based on higher volatility
-  crisis_regime_idx <- which.max(stdevs)
-  normal_regime_idx <- which.min(stdevs)
-  
-  # Build comparison table with clear labels
+  coefs    <- msm_obj@Coef
+  stdevs   <- msm_obj@std
+  transmat <- msm_obj@transMat
+
+  # Identify regimes by volatility
+  crisis_idx <- which.max(stdevs)
+  normal_idx <- which.min(stdevs)
+
+  # Build comparison table
+  # Added 'check.names = FALSE' to keep column names as-is (e.g., with spaces and %)
   regime_df <- data.frame(
-    Regime = c("Normal", "Crisis"),
-    `Mean (% daily)` = c(coefs[normal_regime_idx, 1], coefs[crisis_regime_idx, 1]) * 100,
-    `Volatility (% daily)` = c(stdevs[normal_regime_idx], stdevs[crisis_regime_idx]) * 100,
-    `Persistence` = c(trans_mat[normal_regime_idx, normal_regime_idx], trans_mat[crisis_regime_idx, crisis_regime_idx]),
-    `Expected Duration (Days)` = c(1 / (1 - trans_mat[normal_regime_idx, normal_regime_idx]), 1 / (1 - trans_mat[crisis_regime_idx, crisis_regime_idx]))
+    `Regime`                   = c("Normal", "Crisis"),
+    `Mean (% daily)`           = c(coefs[normal_idx, 1],  coefs[crisis_idx, 1]) * 100,
+    `Volatility (% daily)`     = c(stdevs[normal_idx],    stdevs[crisis_idx])   * 100,
+    `Persistence`              = c(transmat[normal_idx, normal_idx],
+                                 transmat[crisis_idx, crisis_idx]),
+    `Expected Duration (Days)` = c(1 / (1 - transmat[normal_idx, normal_idx]),
+                                   1 / (1 - transmat[crisis_idx, crisis_idx])),
+    check.names = FALSE
   )
+
+  # Write the Markdown subheader
+  cat("### Regime Comparison: ", asset_name, "\n\n", sep = "")
+
+  # Render the table as HTML.
   
-  print(
-    kable(regime_df, digits = 3, row.names = FALSE,
-          caption = sprintf("Regime Characteristics for %s", asset_name)) %>%
-      kable_styling(bootstrap_options = "striped", full_width = FALSE)
-  )
-  cat("\n")
+  kable(regime_df, digits = 3, row.names = FALSE,
+        caption = paste0("Regime Characteristics for ", asset_name))  %>%
+    kableExtra::kable_styling(bootstrap_options = "striped", full_width = FALSE)
 }
 
-# Display results for both models
-display_regime_comparison(msm_spy, "S&P 500 (SPY)")
-display_regime_comparison(msm_tlt, "20Y+ Treasury (TLT)")
+# Display results for both models (assuming msm_spy and msm_tlt exist)
+ display_regime_comparison(msm_spy, "S&P 500 (SPY)")
+ display_regime_comparison(msm_tlt, "20Y+ Treasury (TLT)")
 ```
+
+
+
 
 ## 5.3. Regime Probability Analysis
 
